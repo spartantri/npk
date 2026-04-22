@@ -79,9 +79,7 @@ local regionKeys = std.objectFields(settings.regions);
   				types: ["EDGE"]
   			}
   		},
-  		deployment: {
-  			stage_name: "v1"
-  		},
+  		deployment: {},
   		root: {
   			children: [{
   				pathPart: "userproxy",
@@ -205,7 +203,7 @@ local regionKeys = std.objectFields(settings.regions);
 			aws_api_gateway_base_path_mapping: {
 				[apiName]: {
 					api_id: "${aws_api_gateway_rest_api.%s.id}" % apiName,
-					stage_name: "${aws_api_gateway_deployment.%s.stage_name}" % apiName,
+					stage_name: "${aws_api_gateway_stage.%s.stage_name}" % apiName,
 					domain_name: "${aws_api_gateway_domain_name.npk.domain_name}",
 					base_path: "v1"
 				}
@@ -852,7 +850,7 @@ local regionKeys = std.objectFields(settings.regions);
 			required_providers: {
 				aws: {
 					source: "hashicorp/aws",
-					version: "~> 3.57.0"
+					version: "~> 5.94.1"
 				},
 				archive: {
 					source: "hashicorp/archive",
@@ -913,29 +911,44 @@ local regionKeys = std.objectFields(settings.regions);
 	's3.tf.json': {
 		resource: {
 			aws_s3_bucket: {
-				user_data: s3.bucket(
-					"npk-user-data-",
-					std.map(
-						s3.cors_rule,
-						[
-							"http://localhost"
-						] + if settings.useCustomDNS then
-								[ "https://%s" % [settings.wwwEndpoint] ]
-							else
-								[ "https://${aws_cloudfront_distribution.npk.domain_name}" ]
-					)
-				) + {
-					lifecycle_rule: {
-						enabled: "true",
+				user_data: s3.bucket("npk-user-data-"),
+				static_site: s3.bucket("npk-site-content-"),
+				logs: s3.bucket("npk-logs-")
+			},
+			aws_s3_bucket_acl: {
+				logs: {
+					bucket: "${aws_s3_bucket.logs.id}",
+					acl: "log-delivery-write",
+
+					depends_on: ["aws_s3_bucket_ownership_controls.logs"]
+				}
+			},
+			aws_s3_bucket_lifecycle_configuration: {
+				user_data: {
+					bucket: "${aws_s3_bucket.user_data.id}",
+
+					rule: {
+						id: "1",
+						status: "Enabled",
+						filter: {
+							prefix: "",
+						},
 						expiration: {
 							days: 7
 						},
-						abort_incomplete_multipart_upload_days: 1
+						abort_incomplete_multipart_upload: {
+							days_after_initiation: 1
+						}
 					}
-				},
-				static_site: s3.bucket("npk-site-content-"),
-				logs: s3.bucket("npk-logs-") + {
-					acl: "log-delivery-write"
+				}
+			},
+			aws_s3_bucket_ownership_controls: {
+				logs: {
+					bucket: "${aws_s3_bucket.logs.id}",
+
+					rule: [{
+						object_ownership: "BucketOwnerPreferred"
+					}]
 				}
 			}
 		},
@@ -950,8 +963,16 @@ local regionKeys = std.objectFields(settings.regions);
 			aws_s3_bucket: {
 				dictionary: {
 					bucket_prefix: "npk-dictionary-" + settings.primaryRegion + "-",
-					acl: "private",
 					force_destroy: true,
+
+					tags: {
+						Project: "NPK"
+					}
+				}
+			},
+			aws_s3_bucket_cors_configuration: {
+				dictionary: {
+					bucket: "${aws_s3_bucket.dictionary.id}",
 
 					cors_rule: {
 					    allowed_headers: ["*"],
@@ -960,10 +981,22 @@ local regionKeys = std.objectFields(settings.regions);
 					    expose_headers : ["x-amz-meta-lines", "x-amz-meta-size", "x-amz-meta-type", "content-length", "ETag"],
 					    max_age_seconds: 3000
 					},
+				},
+				user_data: {
+					bucket: "${aws_s3_bucket.user_data.id}",
 
-					tags: {
-						Project: "NPK"
-					}
+					cors_rule: {
+					    allowed_headers: ["*"],
+					    allowed_methods: ["GET", "PUT", "POST", "HEAD", "DELETE"],
+					    allowed_origins: [
+							"http://localhost"
+						] + if settings.useCustomDNS then
+								[ "https://%s" % [settings.wwwEndpoint] ]
+							else
+								[ "https://${aws_cloudfront_distribution.npk.domain_name}" ],
+					    expose_headers : ["x-amz-meta-lines", "x-amz-meta-size", "x-amz-meta-type", "content-length", "ETag"],
+					    max_age_seconds: 3000
+					},
 				}
 			},
 			aws_s3_bucket_notification: {
@@ -1043,6 +1076,17 @@ local regionKeys = std.objectFields(settings.regions);
 	'sync_npkcomponents.tf.json': {
 		resource: {
 			null_resource: {
+				set_default_multipart_threshold: {
+					triggers: {
+				        content: "${timestamp()}"
+				    },
+
+				    provisioner: {
+				    	"local-exec": {
+				        	command: "aws configure set default.s3.multipart_threshold 5GB",
+					    }
+				    }
+				},
 				sync_npkcomponents: {
 				    triggers: {
 				        content: "${timestamp()}"
@@ -1050,15 +1094,17 @@ local regionKeys = std.objectFields(settings.regions);
 
 				    provisioner: {
 				    	"local-exec": {
-				        	command: "aws s3 sync s3://npk-dictionary-west-2-20181029005812750900000002 s3://${aws_s3_bucket.dictionary.id} --request-payer requester --source-region us-west-2 --region " + settings.primaryRegion,
+				        	command: "aws s3 sync s3://npk-dictionary-west-2-20181029005812750900000002 s3://${aws_s3_bucket.dictionary.id} --metadata-directive COPY --request-payer requester --source-region us-west-2 --region " + settings.primaryRegion,
 					    }
-				    }
+				    },
+
+				    depends_on: ["null_resource.set_default_multipart_threshold"]
 				}
 			}
 		},
 		output: {
 			aws_s3_sync_bucket_command: {
-				value: "aws s3 sync s3://npk-dictionary-west-2-20181029005812750900000002 s3://${aws_s3_bucket.dictionary.id} --request-payer requester --source-region us-west-2 --region " + settings.primaryRegion
+				value: "aws s3 sync s3://npk-dictionary-west-2-20181029005812750900000002 s3://${aws_s3_bucket.dictionary.id} --metadata-directive COPY --request-payer requester --source-region us-west-2 --region " + settings.primaryRegion
 			}
 		}
 	},

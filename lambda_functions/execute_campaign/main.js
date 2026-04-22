@@ -225,7 +225,7 @@ exports.main = async function(event, context, callback) {
     	Values: [archs[manifest.instanceType]]
     });
 
-    const defaultImageName = "Deep Learning AMI GPU TensorFlow * (Amazon Linux 2) *";
+    const defaultImageName = "Deep Learning Base OSS Nvidia Driver GPU AMI (Amazon Linux 2023) *";
 
 	imageFilters.push({
     	Name: "name",
@@ -258,6 +258,8 @@ exports.main = async function(event, context, callback) {
 		console.log("Failed to retrieve price and image details.", e);
 		return respond(500, {}, "Failed to retrieve price and image details.", false);
 	}
+
+	console.log(image);
 
 	image = image.Images.reduce((newest, entry) => 
 		entry.CreationDate > newest.CreationDate ? entry : newest
